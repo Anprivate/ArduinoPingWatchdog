@@ -36,12 +36,15 @@
 // save values: 1000 to 5000, say.
 #define PING_REQUEST_TIMEOUT_MS     500
 
+#define YELLOW_ALARM_TIMEOUT        30000
+#define RED_ALARM_TIMEOUT           60000
+#define BUZZER_ALARM_TIMEOUT        120000
+
 int16_t to_next_ping = 0;
-int16_t from_last_success = 0;
+int32_t from_last_success = 0;
+int32_t from_first_fail = 0;
 
 bool ping_was_sended = false;
-bool ping_ok = true;
-
 byte beep_phase = 0;
 byte cur_color = 0;
 
@@ -53,6 +56,8 @@ SOCKET pingSocket = 0;
 
 char buffer [256];
 ICMPPing ping(pingSocket, (uint16_t)random(0, 255));
+
+ICMPEchoReply echoReply;
 
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NEO_NUMPIXELS, NEO_PIN, NEO_RGB + NEO_KHZ800);
 
@@ -73,52 +78,12 @@ void setup()
 
 void loop()
 {
-  static ICMPEchoReply echoReply;
-
-  /*
-      if (! ping.asyncStart(pingAddr, 3, echoResult))
-    {
-      Serial.print("Couldn't even send our ping request?? Status: ");
-      Serial.println((int)echoResult.status);
-      delay(500);
-      return;
-      }
-
-    while (! ping.asyncComplete(echoResult))
-    {
-    // we have critical stuff we wish to handle
-    // while we wait for ping to come back
-    someCriticalStuffThatCantWait();
-    }
-
-    // async is done!  let's see how it worked out...
-    if (echoResult.status != SUCCESS)
-    {
-    // failure... but whyyyy?
-    sprintf(buffer, "Echo request failed; %d", echoResult.status);
-    } else {
-    // huzzah
-    lastPingSucceeded = true;
-    sprintf(buffer,
-            "Reply[%d] from: %d.%d.%d.%d: bytes=%d time=%ldms TTL=%d",
-            echoResult.data.seq,
-            echoResult.addr[0],
-            echoResult.addr[1],
-            echoResult.addr[2],
-            echoResult.addr[3],
-            REQ_DATASIZE,
-            millis() - echoResult.data.time,
-            echoResult.ttl);
-    }
-
-  */
-
   if (ping_was_sended) {
     if (ping.asyncComplete(echoReply)) {
       // ping request completed
       if (echoReply.status == SUCCESS) {
         from_last_success = 0;
-        ping_ok = true;
+        from_first_fail = 0;
         sprintf(buffer,
                 "Reply[%d] from: %d.%d.%d.%d: bytes=%d time=%ldms TTL=%d",
                 echoReply.data.seq,
@@ -132,9 +97,9 @@ void loop()
       }
       else
       {
+        if (from_first_fail == 0) from_first_fail = 1;
         to_next_ping = ALARM_PING_PERIOD;
-        ping_ok = false;
-        sprintf(buffer, "Echo request failed; %d", echoReply.status);
+        sprintf(buffer, "Echo request failed; %d %d", echoReply.status, from_first_fail);
       }
       ping_was_sended = false;
       Serial.println(buffer);
@@ -150,43 +115,50 @@ void loop()
         Serial.print("Couldn't even send ping request with status: ");
         Serial.println((int)echoReply.status);
         to_next_ping = ALARM_PING_PERIOD;
-        ping_ok = false;
+        if (from_first_fail == 0) from_first_fail = 1;
       }
     }
   }
 
+  byte r_col = 0, g_col = 0, b_col = 0;
 
-  if (ping_ok) {
-    byte g_col = cur_color & 0x7F;
-    byte b_col = 64 - g_col;
-
-    pixels.setPixelColor(0, 0, g_col, b_col); // RGB
-    if (cur_color & 0x80) {
-      cur_color--;
-      if (cur_color == 0x80) cur_color = 0;
-    } else {
-      cur_color++;
-      if (cur_color >= 64) cur_color = 0x80 + 64;
-    }
-
-    digitalWrite(BUZZ_PIN, 0);
+  if (from_first_fail > RED_ALARM_TIMEOUT) {
+    if (beep_phase & 0x08) r_col = 255;
   } else {
-    byte r_col;
-    if (beep_phase & 0x08) {
-      r_col = 255;
-      digitalWrite(BUZZ_PIN, 1);
+    if (from_first_fail > YELLOW_ALARM_TIMEOUT) {
+      if (beep_phase & 0x08) g_col = r_col = 128;
     } else {
-      r_col = 0;
-      digitalWrite(BUZZ_PIN, 0);
+      g_col = cur_color & 0x7F;
+      b_col = 64 - g_col;
+      if (cur_color & 0x80) {
+        cur_color--;
+        if (cur_color == 0x80) cur_color = 0;
+      } else {
+        cur_color++;
+        if (cur_color >= 64) cur_color = 0x80 + 64;
+      }
     }
-    pixels.setPixelColor(0, r_col, 0, 0); // RGB
-    beep_phase++;
   }
-
+  pixels.setPixelColor(0, r_col, g_col, b_col); // RGB
   pixels.show(); // This sends the updated pixel color to the hardware.
 
+  if (from_first_fail > BUZZER_ALARM_TIMEOUT) {
+    if (beep_phase & 0x08) {
+      digitalWrite(BUZZ_PIN, 1);
+    } else {
+      digitalWrite(BUZZ_PIN, 0);
+    }
+  } else {
+    digitalWrite(BUZZ_PIN, 0);
+  }
+
+  beep_phase++;
+
   delay(30);
+
   if (to_next_ping > 0) to_next_ping -= 30;
+  if (from_last_success < 0x40000000) from_last_success += 30;
+  if ((from_first_fail != 0) && (from_first_fail < 0x40000000)) from_first_fail += 30;
 }
 
 
